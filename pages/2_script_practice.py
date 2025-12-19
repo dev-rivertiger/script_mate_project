@@ -11,6 +11,7 @@ import asyncio
 import edge_tts
 import nest_asyncio
 import base64
+import uuid
 
 # 비동기 충돌 방지
 nest_asyncio.apply()
@@ -29,11 +30,30 @@ st.markdown("""
         background: linear-gradient(90deg, #FF512F 0%, #DD2476 100%);
         -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     }
-    .step-header { font-size: 1.3rem; font-weight: 700; color: #DD2476; margin-top: 20px; margin-bottom: 10px; }
-    .info-box { background-color: #f0f2f6; padding: 15px; border-radius: 10px; margin-bottom: 10px; }
-    .past-msg { opacity: 0.7; }
     div.stButton > button { width: 100%; font-weight: bold; border-radius: 10px; }
     div[data-testid="stRadio"] > label { font-weight: bold; }
+    
+    /* [추가] 오디오 재생 버튼 스타일 */
+    .audio-btn {
+        display: block;
+        width: 100%;
+        background-color: #f0f2f6;
+        border: 1px solid #d1d5db;
+        color: #31333F;
+        padding: 15px;
+        text-align: center;
+        text-decoration: none;
+        font-size: 16px;
+        font-weight: bold;
+        border-radius: 8px;
+        cursor: pointer;
+        margin: 10px 0;
+        transition: 0.3s;
+    }
+    .audio-btn:active {
+        background-color: #e2e4e9;
+        transform: scale(0.98);
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -57,29 +77,71 @@ def is_pure_direction(text):
     cleaned = clean_text_for_comparison(text)
     return len(cleaned) == 0 
 
-# [핵심] HTML 플레이어 생성 (화면에 보이게 설정)
+# [핵심 UX 개선] 자동 재생 시도 -> 실패시 예쁜 버튼 노출
 async def get_audio_html(text, voice, rate_str):
     communicate = edge_tts.Communicate(text, voice, rate=rate_str)
     mp3_data = b""
-    
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
             mp3_data += chunk["data"]
             
-    if len(mp3_data) == 0:
-        return None
+    if len(mp3_data) == 0: return None
 
     # Base64 변환
     b64_audio = base64.b64encode(mp3_data).decode()
+    unique_id = f"audio_{uuid.uuid4()}" # 고유 ID
     
-    # HTML 태그: style="display: none;" 제거함 -> 자동재생 실패 시 보여주기 위함
+    # HTML/JS 로직:
+    # 1. 오디오 태그 생성 (숨김)
+    # 2. 로드되자마자 play() 시도
+    # 3. 실패하면(catch) -> 버튼을 보여줌 (display: block)
+    # 4. 버튼 누르면 -> play() 하고 버튼 다시 숨김
+    
     html_code = f"""
-        <div style="margin-top: 10px; margin-bottom: 10px;">
-            <p style="font-size: 0.8em; color: gray; margin-bottom: 5px;">🔊 상대방 대사 (자동 재생이 안 되면 눌러주세요)</p>
-            <audio controls autoplay playsinline style="width: 100%;">
-                <source src="data:audio/mp3;base64,{b64_audio}" type="audio/mp3">
-            </audio>
+        <audio id="{unique_id}" preload="auto">
+            <source src="data:audio/mp3;base64,{b64_audio}" type="audio/mp3">
+        </audio>
+
+        <div id="btn_{unique_id}" class="audio-btn" style="display:none;" onclick="playAudio('{unique_id}')">
+            🔊 터치하여 상대 대사 듣기
         </div>
+
+        <script>
+            var audio = document.getElementById('{unique_id}');
+            var btn = document.getElementById('btn_{unique_id}');
+            
+            // 재생 함수
+            function playAudio(id) {{
+                var a = document.getElementById(id);
+                var b = document.getElementById('btn_' + id);
+                a.play();
+                b.style.display = 'none'; // 재생되면 버튼 숨기기
+                // 재생 끝나면 다시 버튼 보이기 (반복 연습 위해)
+                a.onended = function() {{
+                   b.innerHTML = "🔄 다시 듣기";
+                   b.style.display = 'block';
+                }};
+            }}
+
+            // 1. 자동 재생 시도
+            var playPromise = audio.play();
+
+            if (playPromise !== undefined) {{
+                playPromise.then(_ => {{
+                    // 자동 재생 성공! (PC 등) -> 버튼 계속 숨김
+                    // 재생 끝나면 다시 듣기 버튼 표시
+                    audio.onended = function() {{
+                        btn.innerHTML = "🔄 다시 듣기";
+                        btn.style.display = 'block';
+                    }};
+                }})
+                .catch(error => {{
+                    // 자동 재생 실패! (모바일) -> 버튼 보여주기
+                    console.log("Autoplay prevented. Showing button.");
+                    btn.style.display = 'block';
+                }});
+            }}
+        </script>
     """
     return html_code
 
@@ -121,10 +183,8 @@ if not st.session_state['is_practice_started']:
             try:
                 temp_dir = tempfile.gettempdir()
                 file_path = os.path.join(temp_dir, uploaded_file.name)
-                
                 with open(file_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
-                
                 st.session_state['prac_file_path'] = file_path
                 st.session_state['prac_filename'] = uploaded_file.name
                 st.session_state['prac_analysis_done'] = False
@@ -133,9 +193,7 @@ if not st.session_state['is_practice_started']:
             except Exception as e:
                 st.error(f"파일 저장 중 오류가 발생했습니다: {e}")
 
-        # STEP 1
         st.markdown('<div class="step-header">STEP 1. 대본 형식 설정</div>', unsafe_allow_html=True)
-        
         with st.expander("🔍 대본 내용 미리보기 (형식 확인용)", expanded=True):
             if st.session_state['prac_file_path'] and os.path.exists(st.session_state['prac_file_path']):
                 with pdfplumber.open(st.session_state['prac_file_path']) as pdf:
@@ -143,7 +201,6 @@ if not st.session_state['is_practice_started']:
                     preview_page = st.number_input("확인할 페이지", min_value=1, max_value=total_pages, value=1, key="p_preview_1")
                     extracted_txt = pdf.pages[preview_page - 1].extract_text(layout=True)
                     st.text_area("텍스트 내용", extracted_txt, height=200)
-
         st.markdown("<br>", unsafe_allow_html=True)
 
         col1, col2 = st.columns(2)
@@ -175,7 +232,6 @@ if not st.session_state['is_practice_started']:
                     st.session_state['prac_analysis_done'] = True
                     st.rerun()
 
-        # STEP 2
         if st.session_state['prac_analysis_done']:
             st.markdown('<div class="step-header">STEP 2. 배역 확정</div>', unsafe_allow_html=True)
             c1, c2 = st.columns([2, 1], gap="medium")
@@ -222,7 +278,6 @@ if not st.session_state['is_practice_started']:
                 st.markdown("선택된 배역이 없습니다.")
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # STEP 3
             st.markdown('<div class="step-header">STEP 3. 연습 범위 설정</div>', unsafe_allow_html=True)
             
             if final_roles:
@@ -342,23 +397,18 @@ else:
         
         st.chat_message("user", avatar="👤").write(f"**[{target_index+1}] {my_role}:** ❓❓❓")
         
-        # [수정] 오디오 태그를 화면에 보이게 출력
         if tts_enabled and cue_line_text and st.session_state['last_played_index'] != target_index:
             try:
                 speaker_gender = gender_map.get(cue_line_role, '여성')
                 voice_code = "ko-KR-InJoonNeural" if speaker_gender == '남성' else "ko-KR-SunHiNeural"
-                
                 audio_html = asyncio.run(get_audio_html(cue_line_text, voice_code, rate_str))
                 
                 if audio_html:
                     st.markdown(audio_html, unsafe_allow_html=True)
-                else:
-                    st.caption("⚠️ 오디오 데이터 없음")
-
                 st.session_state['last_played_index'] = target_index
                 
             except Exception as e:
-                st.error(f"⚠️ 오디오 재생 실패: {e}")
+                st.error(f"⚠️ 오디오 재생 오류: {e}")
 
         wrapped_text = textwrap.fill(current_line['text'], width=45)
         with st.expander("💡 힌트 보기"): st.code(wrapped_text, language=None)
