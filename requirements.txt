@@ -3,3 +3,4 @@ pdfplumber
 pymupdf
 reportlab
 edge-tts
+nest_asyncio

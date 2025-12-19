@@ -9,6 +9,10 @@ import pdfplumber
 import textwrap
 import asyncio
 import edge_tts
+import nest_asyncio # 👈 추가됨
+
+# [핵심 1] 비동기 충돌 방지 패치 적용
+nest_asyncio.apply()
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from logic import extract_script_data, scan_candidates
@@ -29,7 +33,6 @@ st.markdown("""
     .past-msg { opacity: 0.7; }
     div.stButton > button { width: 100%; font-weight: bold; border-radius: 10px; }
     
-    /* 성별 선택 라디오 버튼 스타일 */
     div[data-testid="stRadio"] > label { font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
@@ -54,14 +57,25 @@ def is_pure_direction(text):
     cleaned = clean_text_for_comparison(text)
     return len(cleaned) == 0 
 
-# [TTS] 오디오 생성 함수
-async def generate_audio_file(text, voice, rate_str):
+# [핵심 2] 오디오 생성 함수 (Bytes 리턴 방식)
+async def generate_audio_data(text, voice, rate_str):
     communicate = edge_tts.Communicate(text, voice, rate=rate_str)
-    temp_dir = tempfile.gettempdir()
-    # 파일명에 타임스탬프를 넣어 캐시 문제 방지
-    output_path = os.path.join(temp_dir, f"speech_{int(time.time()*1000)}.mp3")
-    await communicate.save(output_path)
-    return output_path
+    
+    # 임시 파일에 저장했다가 다시 읽어서 Bytes로 반환
+    # (Streamlit Cloud 환경에서 경로 문제 해결을 위해)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+        await communicate.save(tmp_file.name)
+        tmp_path = tmp_file.name
+        
+    with open(tmp_path, "rb") as f:
+        audio_bytes = f.read()
+    
+    try:
+        os.remove(tmp_path) # 읽었으면 파일 삭제
+    except:
+        pass
+        
+    return audio_bytes
 
 # --- 세션 초기화 ---
 if 'script_data' not in st.session_state: st.session_state['script_data'] = []
@@ -73,7 +87,6 @@ if 'prac_candidates' not in st.session_state: st.session_state['prac_candidates'
 if 'prac_custom_roles' not in st.session_state: st.session_state['prac_custom_roles'] = []
 if 'prac_analysis_done' not in st.session_state: st.session_state['prac_analysis_done'] = False
 if 'last_played_index' not in st.session_state: st.session_state['last_played_index'] = -1
-# [추가] 배역별 성별 저장소
 if 'role_gender_map' not in st.session_state: st.session_state['role_gender_map'] = {}
 
 # --- 콜백 ---
@@ -105,9 +118,9 @@ if not st.session_state['is_practice_started']:
                 st.session_state['prac_filename'] = uploaded_file.name
                 st.session_state['prac_analysis_done'] = False
                 st.session_state['prac_custom_roles'] = []
-                st.session_state['role_gender_map'] = {} # 파일 바뀌면 성별 정보 초기화
+                st.session_state['role_gender_map'] = {}
 
-        # STEP 1: 설정
+        # STEP 1
         st.markdown('<div class="step-header">STEP 1. 대본 형식 설정</div>', unsafe_allow_html=True)
         
         with st.expander("🔍 대본 내용 미리보기 (형식 확인용)", expanded=True):
@@ -116,7 +129,7 @@ if not st.session_state['is_practice_started']:
                     total_pages = len(pdf.pages)
                     preview_page = st.number_input("확인할 페이지", min_value=1, max_value=total_pages, value=1, key="p_preview_1")
                     extracted_txt = pdf.pages[preview_page - 1].extract_text(layout=True)
-                    st.text_area("텍스트 내용", extracted_txt, height=200, help="이 내용을 보고 아래 설정을 선택하세요.")
+                    st.text_area("텍스트 내용", extracted_txt, height=200)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -136,7 +149,6 @@ if not st.session_state['is_practice_started']:
                 if '대괄호' in name_style: wrapper_regex = r'^\s*\[(.+?)\]'
                 elif '소괄호' in name_style: wrapper_regex = r'^\s*\((.+?)\)'
                 elif '꺽쇠' in name_style: wrapper_regex = r'^\s*<(.+?)>'
-                
                 separator = None
                 if sep_style == 'calc_strict': separator = None
                 elif sep_style == ':': separator = ':'
@@ -147,10 +159,9 @@ if not st.session_state['is_practice_started']:
                 st.session_state['prac_analysis_done'] = True
                 st.rerun()
 
-        # STEP 2: 배역 확정 및 성별 설정
+        # STEP 2
         if st.session_state['prac_analysis_done']:
             st.markdown('<div class="step-header">STEP 2. 배역 확정</div>', unsafe_allow_html=True)
-            
             c1, c2 = st.columns([2, 1], gap="medium")
             selected_from_list = []
             
@@ -164,7 +175,7 @@ if not st.session_state['is_practice_started']:
                             if cols[i % 2].checkbox(f"{name} ({cnt})", value=default_chk, key=f"p_chk_{i}"):
                                 selected_from_list.append(name)
                 else:
-                    st.warning("검출된 후보가 없습니다.")
+                    st.warning("후보가 없습니다.")
 
             with c2:
                 st.markdown("**직접 추가**")
@@ -178,23 +189,14 @@ if not st.session_state['is_practice_started']:
 
             final_roles = sorted(list(set(selected_from_list) | set(customs)))
             
-            # [추가] 배역별 성별 설정 UI
             st.markdown("<br>", unsafe_allow_html=True)
             if final_roles:
                 st.markdown("##### 🚻 배역 성별 설정 (목소리 구분)")
                 st.caption("선택한 배역의 성별을 지정하면, 연습 시 목소리가 자동으로 바뀝니다.")
-                
-                # 깔끔하게 그리드 형태로 배치
                 cols = st.columns(3)
                 for i, role in enumerate(final_roles):
                     with cols[i % 3]:
-                        # 기본값은 여성으로 설정
-                        gender = st.radio(
-                            f"**{role}**", 
-                            ['여성', '남성'], 
-                            horizontal=True, 
-                            key=f"gender_{role}"
-                        )
+                        gender = st.radio(f"**{role}**", ['여성', '남성'], horizontal=True, key=f"gender_{role}")
                         st.session_state['role_gender_map'][role] = gender
             
             st.markdown("<div class='info-box'>", unsafe_allow_html=True)
@@ -204,7 +206,7 @@ if not st.session_state['is_practice_started']:
                 st.markdown("선택된 배역이 없습니다.")
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # STEP 3: 연습 시작
+            # STEP 3
             st.markdown('<div class="step-header">STEP 3. 연습 범위 설정</div>', unsafe_allow_html=True)
             
             if final_roles:
@@ -214,10 +216,8 @@ if not st.session_state['is_practice_started']:
             
             st.markdown("**어디서부터 연습할까요?**")
             start_option = st.radio("시작 기준", ('처음부터', '페이지 번호로', '특정 대사/문구로'), horizontal=True)
-            
             start_val_page = 1
             start_val_phrase = ""
-            
             if start_option == '페이지 번호로':
                 start_val_page = st.number_input("시작 페이지", min_value=1, value=1)
             elif start_option == '특정 대사/문구로':
@@ -236,7 +236,6 @@ if not st.session_state['is_practice_started']:
                         if '대괄호' in name_style: wrapper_regex = r'^\s*\[(.+?)\]'
                         elif '소괄호' in name_style: wrapper_regex = r'^\s*\((.+?)\)'
                         elif '꺽쇠' in name_style: wrapper_regex = r'^\s*<(.+?)>'
-                        
                         separator = None
                         if sep_style == 'calc_strict': separator = None
                         elif sep_style == ':': separator = ':'
@@ -271,11 +270,8 @@ else:
     with st.sidebar:
         st.markdown("### 🔊 음성 설정")
         tts_enabled = st.toggle("상대 대사 읽어주기 (Edge TTS)", value=True)
-        
-        # [수정] 목소리 선택 제거 (자동 할당이므로) -> 속도만 남김
         speed_val = st.slider("말하기 속도", -50, 50, 0, 10, format="%d%%")
         rate_str = f"{speed_val:+d}%"
-        
         st.info("💡 배역 성별 설정에 따라\n목소리가 자동 변경됩니다.\n(남: 인준 / 여: 선히)")
     
     script = st.session_state['script_data']
@@ -299,10 +295,10 @@ else:
 
     st.markdown("---")
 
-    # 2. 현재 내 차례 & TTS 큐 대사 찾기
+    # 2. 현재 & TTS 큐
     target_index = -1
     cue_line_text = ""
-    cue_line_role = "" # 큐 대사의 화자
+    cue_line_role = ""
     
     for i in range(start_index, len(script)):
         line = script[i]
@@ -323,30 +319,29 @@ else:
                 target_index = i
                 break 
     
-    # 3. 입력창 및 TTS 재생
+    # 3. 입력창
     if target_index != -1:
         current_line = script[target_index]
         st.progress((target_index / len(script)), text=f"No. {target_index+1} / {len(script)}")
         
         st.chat_message("user", avatar="👤").write(f"**[{target_index+1}] {my_role}:** ❓❓❓")
         
-        # [핵심] TTS 자동 재생 (성별에 따른 목소리 분기)
+        # [핵심 수정] 파일을 Bytes로 받아와서 재생 (경로 에러 방지)
         if tts_enabled and cue_line_text and st.session_state['last_played_index'] != target_index:
             try:
-                # 1. 화자의 성별 확인 (기본값: 여성)
                 speaker_gender = gender_map.get(cue_line_role, '여성')
-                
-                # 2. 성별에 따른 Voice Code 설정
                 voice_code = "ko-KR-InJoonNeural" if speaker_gender == '남성' else "ko-KR-SunHiNeural"
                 
-                # 3. 음성 생성 및 재생
-                audio_file = asyncio.run(generate_audio_file(cue_line_text, voice_code, rate_str))
-                st.audio(audio_file, format="audio/mp3", autoplay=True)
+                # 비동기 함수 실행 (Bytes 반환)
+                audio_bytes = asyncio.run(generate_audio_data(cue_line_text, voice_code, rate_str))
                 
+                # Bytes 데이터를 바로 재생
+                st.audio(audio_bytes, format="audio/mp3", autoplay=True)
                 st.session_state['last_played_index'] = target_index
                 
             except Exception as e:
-                st.error(f"음성 생성 오류: {e}")
+                # 에러 로그를 작게 표시 (모바일에서 화면 가림 방지)
+                st.caption(f"⚠️ 오디오 재생 실패: {e}")
 
         wrapped_text = textwrap.fill(current_line['text'], width=45)
         with st.expander("💡 힌트 보기"): st.code(wrapped_text, language=None)
