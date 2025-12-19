@@ -10,6 +10,7 @@ import textwrap
 import asyncio
 import edge_tts
 import nest_asyncio
+import uuid  # 👈 [추가] 고유 파일명 생성을 위해 필요
 
 # [필수] 비동기 충돌 방지
 nest_asyncio.apply()
@@ -57,14 +58,28 @@ def is_pure_direction(text):
     cleaned = clean_text_for_comparison(text)
     return len(cleaned) == 0 
 
-# [핵심] 메모리 스트리밍 방식 (파일 생성 X)
-async def get_audio_bytes_stream(text, voice, rate_str):
+# [핵심 수정] 파일 생성 -> 읽기 -> 삭제 (가장 안정적인 패턴)
+async def generate_audio_bytes(text, voice, rate_str):
     communicate = edge_tts.Communicate(text, voice, rate=rate_str)
-    mp3_data = b""
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            mp3_data += chunk["data"]
-    return mp3_data
+    
+    # 1. 고유한 임시 파일명 생성 (충돌 방지)
+    temp_filename = f"tts_{uuid.uuid4()}.mp3"
+    temp_path = os.path.join(tempfile.gettempdir(), temp_filename)
+    
+    # 2. 파일로 저장 (edge-tts가 파일을 잘 다룸)
+    await communicate.save(temp_path)
+    
+    # 3. 바이트로 읽어오기
+    with open(temp_path, "rb") as f:
+        audio_bytes = f.read()
+        
+    # 4. 파일 삭제 (청소)
+    try:
+        os.remove(temp_path)
+    except:
+        pass
+        
+    return audio_bytes
 
 # --- 세션 초기화 ---
 if 'script_data' not in st.session_state: st.session_state['script_data'] = []
@@ -100,15 +115,12 @@ if not st.session_state['is_practice_started']:
     uploaded_file = st.file_uploader("📂 PDF 파일 업로드", type=['pdf'])
 
     if uploaded_file is not None:
-        # 파일 저장 로직 개선 (안전한 저장)
+        # 파일 저장 로직 (안전한 저장)
         if st.session_state['prac_file_path'] is None or st.session_state.get('prac_filename') != uploaded_file.name:
             try:
-                # 1. 임시 디렉토리 경로 가져오기
                 temp_dir = tempfile.gettempdir()
-                # 2. 파일 경로 생성
-                file_path = os.path.join(temp_dir, uploaded_file.name)
+                file_path = os.path.join(temp_dir, f"uploaded_{uuid.uuid4()}.pdf") # PDF도 고유명으로
                 
-                # 3. 바이너리 쓰기 모드로 저장 (getbuffer 사용이 더 안정적)
                 with open(file_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
                 
@@ -329,12 +341,16 @@ else:
         
         st.chat_message("user", avatar="👤").write(f"**[{target_index+1}] {my_role}:** ❓❓❓")
         
-        # [핵심] 오디오 재생 (메모리 스트림 방식)
+        # [핵심] 오디오 재생 (Standard: File Write -> Read -> Delete)
         if tts_enabled and cue_line_text and st.session_state['last_played_index'] != target_index:
             try:
                 speaker_gender = gender_map.get(cue_line_role, '여성')
                 voice_code = "ko-KR-InJoonNeural" if speaker_gender == '남성' else "ko-KR-SunHiNeural"
-                audio_bytes = asyncio.run(get_audio_bytes_stream(cue_line_text, voice_code, rate_str))
+                
+                # 비동기 함수 실행 (바이트 데이터 받기)
+                audio_bytes = asyncio.run(generate_audio_bytes(cue_line_text, voice_code, rate_str))
+                
+                # 재생
                 st.audio(audio_bytes, format="audio/mp3", autoplay=True)
                 st.session_state['last_played_index'] = target_index
                 
