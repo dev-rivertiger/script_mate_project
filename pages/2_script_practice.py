@@ -32,28 +32,6 @@ st.markdown("""
     }
     div.stButton > button { width: 100%; font-weight: bold; border-radius: 10px; }
     div[data-testid="stRadio"] > label { font-weight: bold; }
-    
-    /* [추가] 오디오 재생 버튼 스타일 */
-    .audio-btn {
-        display: block;
-        width: 100%;
-        background-color: #f0f2f6;
-        border: 1px solid #d1d5db;
-        color: #31333F;
-        padding: 15px;
-        text-align: center;
-        text-decoration: none;
-        font-size: 16px;
-        font-weight: bold;
-        border-radius: 8px;
-        cursor: pointer;
-        margin: 10px 0;
-        transition: 0.3s;
-    }
-    .audio-btn:active {
-        background-color: #e2e4e9;
-        transform: scale(0.98);
-    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -77,73 +55,43 @@ def is_pure_direction(text):
     cleaned = clean_text_for_comparison(text)
     return len(cleaned) == 0 
 
-# [핵심 UX 개선] 자동 재생 시도 -> 실패시 예쁜 버튼 노출
+# [핵심] 심플하고 강력한 순정 오디오 플레이어 (항상 보임)
 async def get_audio_html(text, voice, rate_str):
-    communicate = edge_tts.Communicate(text, voice, rate=rate_str)
-    mp3_data = b""
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            mp3_data += chunk["data"]
-            
-    if len(mp3_data) == 0: return None
+    try:
+        communicate = edge_tts.Communicate(text, voice, rate=rate_str)
+        mp3_data = b""
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                mp3_data += chunk["data"]
+                
+        if len(mp3_data) == 0: return None
 
-    # Base64 변환
-    b64_audio = base64.b64encode(mp3_data).decode()
-    unique_id = f"audio_{uuid.uuid4()}" # 고유 ID
-    
-    # HTML/JS 로직:
-    # 1. 오디오 태그 생성 (숨김)
-    # 2. 로드되자마자 play() 시도
-    # 3. 실패하면(catch) -> 버튼을 보여줌 (display: block)
-    # 4. 버튼 누르면 -> play() 하고 버튼 다시 숨김
-    
-    html_code = f"""
-        <audio id="{unique_id}" preload="auto">
-            <source src="data:audio/mp3;base64,{b64_audio}" type="audio/mp3">
-        </audio>
-
-        <div id="btn_{unique_id}" class="audio-btn" style="display:none;" onclick="playAudio('{unique_id}')">
-            🔊 터치하여 상대 대사 듣기
-        </div>
-
-        <script>
-            var audio = document.getElementById('{unique_id}');
-            var btn = document.getElementById('btn_{unique_id}');
-            
-            // 재생 함수
-            function playAudio(id) {{
-                var a = document.getElementById(id);
-                var b = document.getElementById('btn_' + id);
-                a.play();
-                b.style.display = 'none'; // 재생되면 버튼 숨기기
-                // 재생 끝나면 다시 버튼 보이기 (반복 연습 위해)
-                a.onended = function() {{
-                   b.innerHTML = "🔄 다시 듣기";
-                   b.style.display = 'block';
-                }};
-            }}
-
-            // 1. 자동 재생 시도
-            var playPromise = audio.play();
-
-            if (playPromise !== undefined) {{
-                playPromise.then(_ => {{
-                    // 자동 재생 성공! (PC 등) -> 버튼 계속 숨김
-                    // 재생 끝나면 다시 듣기 버튼 표시
-                    audio.onended = function() {{
-                        btn.innerHTML = "🔄 다시 듣기";
-                        btn.style.display = 'block';
-                    }};
-                }})
-                .catch(error => {{
-                    // 자동 재생 실패! (모바일) -> 버튼 보여주기
-                    console.log("Autoplay prevented. Showing button.");
-                    btn.style.display = 'block';
-                }});
-            }}
-        </script>
-    """
-    return html_code
+        b64_audio = base64.b64encode(mp3_data).decode()
+        unique_id = f"audio_{uuid.uuid4()}"
+        
+        # autoplay: 자동 재생 시도
+        # controls: 실패하더라도 사용자가 누를 수 있게 컨트롤 바 표시
+        html_code = f"""
+            <div style="margin-top: 5px; margin-bottom: 10px;">
+                <audio id="{unique_id}" controls autoplay playsinline style="width: 100%;">
+                    <source src="data:audio/mp3;base64,{b64_audio}" type="audio/mp3">
+                </audio>
+                <script>
+                    // 로드 후 즉시 재생 시도 (브라우저 정책에 따라 막힐 수 있음)
+                    var audio = document.getElementById("{unique_id}");
+                    audio.volume = 1.0;
+                    var playPromise = audio.play();
+                    if (playPromise !== undefined) {{
+                        playPromise.catch(error => {{
+                            console.log("Autoplay blocked. User needs to click play.");
+                        }});
+                    }}
+                </script>
+            </div>
+        """
+        return html_code
+    except Exception as e:
+        return None
 
 # --- 세션 초기화 ---
 if 'script_data' not in st.session_state: st.session_state['script_data'] = []
@@ -401,10 +349,15 @@ else:
             try:
                 speaker_gender = gender_map.get(cue_line_role, '여성')
                 voice_code = "ko-KR-InJoonNeural" if speaker_gender == '남성' else "ko-KR-SunHiNeural"
+                
                 audio_html = asyncio.run(get_audio_html(cue_line_text, voice_code, rate_str))
                 
                 if audio_html:
                     st.markdown(audio_html, unsafe_allow_html=True)
+                else:
+                    # 데이터가 없을 때 표시
+                    st.caption("🔇 오디오 데이터 생성 불가")
+
                 st.session_state['last_played_index'] = target_index
                 
             except Exception as e:
