@@ -74,7 +74,6 @@ def analyze_and_get_coordinates(pdf_path, roles, config, start_page=1, start_phr
     start_page_idx = max(0, start_page - 1)
     number_counter = 1
     found_start_phrase = False if start_phrase else True
-    
     clean_start_phrase = start_phrase.replace(" ", "").replace("\t", "").replace("\n", "")
     
     with pdfplumber.open(pdf_path) as pdf:
@@ -82,24 +81,8 @@ def analyze_and_get_coordinates(pdf_path, roles, config, start_page=1, start_phr
             if page_idx < start_page_idx: continue
             
             words = page.extract_words(x_tolerance=3, y_tolerance=3, keep_blank_chars=True)
-            lines_dict = {}
-            
-            # Y좌표 그룹핑 (Tolerance 5)
             words.sort(key=lambda w: w['top'])
-            if words:
-                current_line = [words[0]]
-                current_top = words[0]['top']
-                for w in words[1:]:
-                    if abs(w['top'] - current_top) < 5:
-                        current_line.append(w)
-                    else:
-                        lines_data_list = lines_dict.get('list', []) 
-                        # 딕셔너리가 아니라 리스트로 관리 필요하지만, 
-                        # 기존 로직 유지를 위해 아래 반복문에서 처리
-                        pass
             
-            # (위의 analyze_and_get_coordinates 로직은 이전 답변과 동일하게 유지 - 생략 없이 전체 코드 제공)
-            # --- 수정된 라인 그룹핑 로직 ---
             lines_data = [] 
             if words:
                 current_line = [words[0]]
@@ -125,10 +108,8 @@ def analyze_and_get_coordinates(pdf_path, roles, config, start_page=1, start_phr
                         continue 
 
                 matched_role = None
-                
                 for role in roles:
                     check_pattern = re.escape(role)
-                    
                     if wrapper_regex:
                         if '(.+?)' in wrapper_regex:
                             check_pattern = config['wrapper_regex'].replace('(.+?)', re.escape(role))
@@ -188,7 +169,7 @@ def create_overlay_pdf(original_pdf_path, output_path, coordinates, font_name):
     os.remove(tmp_path)
 
 # ---------------------------------------------------------
-# 5. [연습] 텍스트 추출 (시작 위치 필터링 추가 🚀)
+# 5. [연습] 텍스트 추출 (지문/괄호 분리 로직 강화 🚀)
 # ---------------------------------------------------------
 def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_page=1, start_phrase=""):
     script_data = []
@@ -198,16 +179,49 @@ def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_pag
     buffer_text = []
     valid_roles_set = set(allowed_roles) if allowed_roles else None
 
-    # 시작 페이지 인덱스 (0부터 시작하므로 -1)
     start_page_idx = max(0, start_page - 1)
-    
-    # 시작 문구 처리
     found_start_phrase = False if start_phrase else True
     clean_start_phrase = start_phrase.replace(" ", "").replace("\t", "").replace("\n", "")
 
+    # [NEW] 지문 판단 헬퍼 함수
+    def is_direction_line(line_text):
+        # 1. 괄호로 감싸진 경우 (예: (퇴장한다))
+        if line_text.startswith('(') and line_text.endswith(')'):
+            return True
+        # 2. 서술형 어미로 끝나는 경우 (한국어 대본 특성)
+        # 예: 웃는다, 나간다, 쳐다본다, 있다, 한다, 된다
+        if line_text.endswith('다.') or line_text.endswith('다'):
+            return True
+        return False
+
+    # [NEW] 대사에서 괄호 제거 헬퍼 함수
+    def remove_parentheses(text):
+        # (지문) 또는 [지문] 또는 <지문> 제거
+        text = re.sub(r'\(.*?\)', '', text)
+        text = re.sub(r'\[.*?\]', '', text)
+        text = re.sub(r'\<.*?\>', '', text)
+        return text.strip()
+
+    # 버퍼 비우기 (대사 저장)
+    def flush_buffer():
+        nonlocal current_role, buffer_text
+        if current_role and buffer_text:
+            full_text = " ".join(buffer_text)
+            # 괄호 제거한 순수 대사 (TTS용)
+            clean_speech = remove_parentheses(full_text)
+            
+            # 대사가 비어있지 않으면 추가 (괄호만 있는 줄은 대사 아님)
+            if clean_speech:
+                script_data.append({
+                    'role': current_role,
+                    'text': clean_speech, # 괄호 제거된 텍스트
+                    'original_text': full_text, # 원본 텍스트(화면 표시용 필요시)
+                    'type': 'dialogue'
+                })
+        buffer_text = []
+
     with pdfplumber.open(pdf_path) as pdf:
         for page_idx, page in enumerate(pdf.pages):
-            # 1. 페이지 스킵
             if page_idx < start_page_idx: continue
 
             text = page.extract_text(layout=True)
@@ -218,19 +232,19 @@ def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_pag
                 line = line.strip()
                 if not line: continue
 
-                # 2. 시작 문구 스킵 로직 (넘버링과 동일하게 공백 무시 비교)
+                # 시작 문구 스킵 로직
                 if not found_start_phrase and clean_start_phrase:
                     clean_line = line.replace(" ", "").replace("\t", "")
                     if clean_start_phrase in clean_line:
                         found_start_phrase = True
                     else:
-                        continue # 문구 찾기 전까지 모든 텍스트 무시
+                        continue 
 
-                # 이하 로직은 찾은 이후에만 실행됨
+                # 1. 역할(이름) 감지 시도
                 found_name = None
                 content_text = ""
-                is_valid_role = False
-
+                
+                # (1) 정규식
                 if wrapper_regex:
                     match = re.match(wrapper_regex, line)
                     if match:
@@ -239,41 +253,59 @@ def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_pag
                         if separator and content_text.startswith(separator):
                             content_text = content_text[len(separator):].strip()
                 
+                # (2) 구분자
                 elif separator:
                     if separator in line:
                         parts = line.split(separator, 1)
                         found_name = parts[0].strip()
                         content_text = parts[1].strip()
                 
+                # (3) 자동 (공백 2칸)
                 else: 
                     parts = re.split(r'\s{2,}|\t', line, maxsplit=1)
                     if len(parts) == 2:
                         found_name = parts[0].strip()
                         content_text = parts[1].strip()
 
-                if found_name:
-                    if 1 <= len(found_name) <= 15:
-                        if valid_roles_set:
-                            if found_name in valid_roles_set:
-                                is_valid_role = True
-                        else:
-                            is_valid_role = True
-
-                if is_valid_role:
-                    if current_role and buffer_text:
-                        script_data.append({'role': current_role, 'text': " ".join(buffer_text)})
-                        buffer_text = []
+                # 역할이 감지됨!
+                if found_name and (not valid_roles_set or found_name in valid_roles_set) and (1 <= len(found_name) <= 15):
+                    flush_buffer() # 이전 사람 대사 저장
                     current_role = found_name
                     if content_text:
-                        buffer_text.append(content_text)
+                        # 역할 옆에 붙은 텍스트가 지문인지 확인 (드물지만)
+                        if is_direction_line(content_text):
+                             # 역할은 잡혔는데 내용은 지문? -> 대사가 아닐 수도 있음. 일단은 대사로 침.
+                             buffer_text.append(content_text)
+                        else:
+                            buffer_text.append(content_text)
+                
+                # 역할이 아님 (대사가 이어지거나, 지문임)
                 else:
-                    # 시작 문구를 찾은 이후라면 지문도 수집
-                    if current_role:
-                        buffer_text.append(line)
+                    # [핵심 로직] 이게 지문(Action)인가 대사(Dialogue)인가?
+                    if is_direction_line(line):
+                        # 지문이면 이전 대사 끊고, 지문으로 따로 저장 (또는 무시)
+                        flush_buffer()
+                        current_role = None # 역할 초기화 (지문 구간 진입)
+                        
+                        # 지문 데이터로 저장 (화면에 보여주기 위함)
+                        script_data.append({
+                            'role': '지문', 
+                            'text': line, 
+                            'original_text': line,
+                            'type': 'action'
+                        })
                     else:
-                        script_data.append({'role': '지문', 'text': line})
+                        # 지문이 아니면 -> 현재 말하는 사람의 계속되는 대사
+                        if current_role:
+                            buffer_text.append(line)
+                        else:
+                            # 말하는 사람이 없는데 텍스트가 나옴 -> 이것도 지문으로 처리
+                            script_data.append({
+                                'role': '지문', 
+                                'text': line, 
+                                'original_text': line,
+                                'type': 'action'
+                            })
 
-    if current_role and buffer_text:
-        script_data.append({'role': current_role, 'text': " ".join(buffer_text)})
-        
+    flush_buffer() # 마지막 대사 저장
     return script_data

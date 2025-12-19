@@ -17,3 +17,6 @@ __pycache__/
 *.pdf
 test.mp3
 voice_sample.py
+넘버링제거.py
+script.txt
+*.pkl
