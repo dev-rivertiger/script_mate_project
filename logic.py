@@ -46,12 +46,10 @@ def scan_candidates(pdf_path, config):
         if wrapper_regex:
             match = re.match(wrapper_regex, line)
             if match: found_name = match.group(1)
-        
         elif separator:
             if separator in line:
                 parts = line.split(separator, 1)
                 found_name = parts[0].strip()
-        
         else:
             parts = re.split(r'\s{2,}|\t', line, maxsplit=1)
             if len(parts) == 2:
@@ -169,7 +167,7 @@ def create_overlay_pdf(original_pdf_path, output_path, coordinates, font_name):
     os.remove(tmp_path)
 
 # ---------------------------------------------------------
-# 5. [연습] 텍스트 추출 (최종: 빈 줄 감지 & 지문 강력 분리)
+# 5. [연습] 텍스트 추출 (스마트 독백 감지 적용 🧠)
 # ---------------------------------------------------------
 def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_page=1, start_phrase=""):
     script_data = []
@@ -183,32 +181,49 @@ def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_pag
     found_start_phrase = False if start_phrase else True
     clean_start_phrase = start_phrase.replace(" ", "").replace("\t", "").replace("\n", "")
 
-    # [HELPER] 지문 판단 (더 강력하게)
-    def is_direction_line(line_text):
+    # [스마트] 지문 판단 로직 개선
+    def is_likely_direction(line_text, is_speaking):
         line_text = line_text.strip()
         if not line_text: return False
         
-        # 1. 괄호로 감싸진 경우
+        # 1. 괄호는 무조건 지문 (또는 대사 속 지문)
         if line_text.startswith('(') and line_text.endswith(')'):
             return True
             
-        # 2. 한국어 서술형 어미 체크 (공백, 기호 제거 후 확인)
-        # 예: "나간다." -> "나간다" -> 끝이 "다"
-        # 예: "웃음..." -> "웃음" -> 끝이 "음"
-        clean_end = re.sub(r'[^가-힣]', '', line_text[-5:]) # 뒤에서 5글자만 추출해서 한글만 남김
-        if clean_end.endswith('다') or clean_end.endswith('함') or clean_end.endswith('음'):
-            return True
-            
+        # 2. 독백 보호 (1인칭 주어) -> "나", "내", "우리"로 시작하면 무조건 대사
+        first_person_keywords = ["나 ", "나는", "내가", "나의", "내 ", "우리는", "우리가"]
+        for kw in first_person_keywords:
+            if line_text.startswith(kw):
+                return False  # 절대 지문 아님 (대사임)
+
+        # 3. 길이 체크: 문장이 너무 길면(40자 이상) 서술형 대사일 확률 높음
+        if len(line_text) > 40:
+            return False
+
+        # 4. 한국어 서술형 어미 체크 (~다, ~함, ~음)
+        # 단, 누군가 말하고 있는 중(is_speaking=True)이라면 기준을 엄격하게 적용
+        clean_end = re.sub(r'[^가-힣]', '', line_text[-5:])
+        ends_with_jimum = clean_end.endswith('다') or clean_end.endswith('함') or clean_end.endswith('음') or clean_end.endswith('장') # 퇴장/등장
+        
+        if ends_with_jimum:
+            # 말하고 있는 중이 아니면 -> 지문일 확률 높음
+            if not is_speaking:
+                return True
+            # 말하고 있는 중이면 -> 정말 짧거나(20자 미만), 확실한 행동(입장/퇴장) 아니면 대사로 간주
+            else:
+                if len(line_text) < 20: 
+                    return True # "전화가 울린다" (짧음 -> 지문)
+                else:
+                    return False # "나는 그렇게 믿고 싶었다." (김 -> 대사)
+                    
         return False
 
-    # [HELPER] 괄호 제거
     def remove_parentheses(text):
         text = re.sub(r'\(.*?\)', '', text)
         text = re.sub(r'\[.*?\]', '', text)
         text = re.sub(r'\<.*?\>', '', text)
         return text.strip()
 
-    # [HELPER] 버퍼 비우기 (대사 저장)
     def flush_buffer():
         nonlocal current_role, buffer_text
         if current_role and buffer_text:
@@ -232,15 +247,15 @@ def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_pag
             
             lines = text.split('\n')
             for line in lines:
-                raw_line = line # 원본 라인 보존 (공백 체크용)
+                raw_line = line
                 line = line.strip()
                 
-                # [핵심 수정 1] 빈 줄(Gap)이 있으면 대사 끊기!
+                # 빈 줄 처리
                 if not line:
                     flush_buffer()
-                    # 빈 줄이 나왔다는 건, 이전 대사가 끝났다는 강력한 신호.
-                    # 역할을 초기화해서 다음 문장이 대사로 합류하는 것을 막음.
-                    current_role = None 
+                    # 빈 줄이 나와도 역할을 바로 끊지 않고, 다음 줄을 보고 판단하기 위해 
+                    # 여기서는 current_role을 None으로 만들지 않습니다.
+                    # 다만 문단 구분을 위해 buffer는 비웁니다.
                     continue
 
                 if not found_start_phrase and clean_start_phrase:
@@ -250,7 +265,7 @@ def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_pag
                     else:
                         continue 
 
-                # 이하 역할 감지 로직은 동일
+                # 역할 감지 시도
                 found_name = None
                 content_text = ""
                 
@@ -272,19 +287,28 @@ def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_pag
                         found_name = parts[0].strip()
                         content_text = parts[1].strip()
 
+                # Case 1: 새로운 역할 발견
                 if found_name and (not valid_roles_set or found_name in valid_roles_set) and (1 <= len(found_name) <= 15):
                     flush_buffer()
                     current_role = found_name
                     if content_text:
-                        if is_direction_line(content_text):
+                        # 역할 옆 텍스트가 지문인지 확인 (말하는 중 아님 False 전달)
+                        if is_likely_direction(content_text, is_speaking=False):
+                             # 이름 옆에 바로 지문이 붙은 경우 (예: 해리 (일어서며))
+                             # 이건 대사 버퍼에 넣지 말고 지문으로 처리할 수도 있지만,
+                             # 보통 대사일 확률이 높으므로 일단 대사 버퍼에 넣고 괄호 제거기에 맡김
                              buffer_text.append(content_text)
                         else:
                             buffer_text.append(content_text)
+                
+                # Case 2: 역할이 아님 (대사 계속 or 지문)
                 else:
-                    # [핵심 수정 2] 지문 판단 후 분기
-                    if is_direction_line(line):
-                        flush_buffer() # 지문이 나오면 앞 대사 저장
-                        current_role = None # 역할 끊기
+                    is_speaking = (current_role is not None)
+                    
+                    if is_likely_direction(line, is_speaking):
+                        # 지문으로 판명됨
+                        flush_buffer()
+                        current_role = None # 지문이 나오면 역할 확실히 끊김
                         script_data.append({
                             'role': '지문', 
                             'text': line, 
@@ -292,13 +316,12 @@ def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_pag
                             'type': 'action'
                         })
                     else:
-                        # 지문 아님. 그런데 역할이 살아있음 -> 대사 이어짐
+                        # 대사로 판명됨 (또는 독백)
                         if current_role:
                             buffer_text.append(line)
                         else:
-                            # 역할도 없고 지문 같지도 않은데 텍스트가 있음.
-                            # (보통 이런 건 이상한 지문이거나 페이지 번호 등임)
-                            # 안전하게 지문 취급하여 대사에 안 섞이게 함.
+                            # 역할이 없는데 대사 같은 긴 글이 나옴 -> 내레이션일 수 있음
+                            # 그냥 지문(Action)으로 처리하되 내용은 보전
                             script_data.append({
                                 'role': '지문', 
                                 'text': line, 
