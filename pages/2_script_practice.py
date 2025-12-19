@@ -1,7 +1,6 @@
 import streamlit as st
 import os
 import sys
-import tempfile
 import difflib
 import re
 import time
@@ -9,9 +8,9 @@ import pdfplumber
 import textwrap
 import asyncio
 import edge_tts
-import nest_asyncio # 👈 추가됨
+import nest_asyncio
 
-# [핵심 1] 비동기 충돌 방지 패치 적용
+# [필수] 비동기 충돌 방지
 nest_asyncio.apply()
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -57,25 +56,17 @@ def is_pure_direction(text):
     cleaned = clean_text_for_comparison(text)
     return len(cleaned) == 0 
 
-# [핵심 2] 오디오 생성 함수 (Bytes 리턴 방식)
-async def generate_audio_data(text, voice, rate_str):
+# [핵심 수정] 파일을 쓰지 않고 메모리에서 바이트 스트림으로 받기
+async def get_audio_bytes_stream(text, voice, rate_str):
     communicate = edge_tts.Communicate(text, voice, rate=rate_str)
+    mp3_data = b""
     
-    # 임시 파일에 저장했다가 다시 읽어서 Bytes로 반환
-    # (Streamlit Cloud 환경에서 경로 문제 해결을 위해)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
-        await communicate.save(tmp_file.name)
-        tmp_path = tmp_file.name
-        
-    with open(tmp_path, "rb") as f:
-        audio_bytes = f.read()
-    
-    try:
-        os.remove(tmp_path) # 읽었으면 파일 삭제
-    except:
-        pass
-        
-    return audio_bytes
+    # 스트림으로 데이터를 조각조각 받아서 합침 (파일 생성 X)
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            mp3_data += chunk["data"]
+            
+    return mp3_data
 
 # --- 세션 초기화 ---
 if 'script_data' not in st.session_state: st.session_state['script_data'] = []
@@ -326,22 +317,22 @@ else:
         
         st.chat_message("user", avatar="👤").write(f"**[{target_index+1}] {my_role}:** ❓❓❓")
         
-        # [핵심 수정] 파일을 Bytes로 받아와서 재생 (경로 에러 방지)
+        # [핵심] 오디오 재생 (메모리 스트림 방식)
         if tts_enabled and cue_line_text and st.session_state['last_played_index'] != target_index:
             try:
                 speaker_gender = gender_map.get(cue_line_role, '여성')
                 voice_code = "ko-KR-InJoonNeural" if speaker_gender == '남성' else "ko-KR-SunHiNeural"
                 
-                # 비동기 함수 실행 (Bytes 반환)
-                audio_bytes = asyncio.run(generate_audio_data(cue_line_text, voice_code, rate_str))
+                # 비동기 함수로 바이트 데이터 가져오기 (파일 생성 X)
+                audio_bytes = asyncio.run(get_audio_bytes_stream(cue_line_text, voice_code, rate_str))
                 
-                # Bytes 데이터를 바로 재생
+                # 바이트 데이터 재생
                 st.audio(audio_bytes, format="audio/mp3", autoplay=True)
                 st.session_state['last_played_index'] = target_index
                 
             except Exception as e:
-                # 에러 로그를 작게 표시 (모바일에서 화면 가림 방지)
-                st.caption(f"⚠️ 오디오 재생 실패: {e}")
+                # 에러 발생 시 화면에 표시해서 확인
+                st.error(f"오디오 재생 오류: {e}")
 
         wrapped_text = textwrap.fill(current_line['text'], width=45)
         with st.expander("💡 힌트 보기"): st.code(wrapped_text, language=None)
