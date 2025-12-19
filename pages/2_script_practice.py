@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import sys
+import tempfile  # 👈 [복구 완료] 이게 빠져서 에러가 났습니다!
 import difflib
 import re
 import time
@@ -9,7 +10,7 @@ import textwrap
 import asyncio
 import edge_tts
 import nest_asyncio
-import base64  # 👈 [추가] 오디오를 텍스트로 변환하기 위해
+import base64
 
 # 비동기 충돌 방지
 nest_asyncio.apply()
@@ -56,7 +57,7 @@ def is_pure_direction(text):
     cleaned = clean_text_for_comparison(text)
     return len(cleaned) == 0 
 
-# [핵심 수정] Base64 HTML 플레이어 생성 함수
+# [핵심] Base64 HTML 플레이어 생성 함수
 async def get_audio_html(text, voice, rate_str):
     communicate = edge_tts.Communicate(text, voice, rate=rate_str)
     mp3_data = b""
@@ -66,22 +67,18 @@ async def get_audio_html(text, voice, rate_str):
         if chunk["type"] == "audio":
             mp3_data += chunk["data"]
             
-    # 2. Base64로 인코딩 (오디오를 문자열로 변환)
+    # 2. Base64로 인코딩
     b64_audio = base64.b64encode(mp3_data).decode()
     
     # 3. HTML 오디오 태그 생성 (Autoplay 적용)
-    # 모바일 호환성을 위해 playsinline, controls 추가
     html_code = f"""
         <audio controls autoplay playsinline style="width: 100%; display: none;">
             <source src="data:audio/mp3;base64,{b64_audio}" type="audio/mp3">
-            브라우저가 오디오를 지원하지 않습니다.
         </audio>
         <script>
             var audio = document.querySelector("audio");
             audio.volume = 1.0;
-            audio.play().catch(function(error) {{
-                console.log("Autoplay blocked: " + error);
-            }});
+            audio.play().catch(e => console.log("Autoplay blocked:", e));
         </script>
     """
     return html_code
@@ -120,7 +117,7 @@ if not st.session_state['is_practice_started']:
     uploaded_file = st.file_uploader("📂 PDF 파일 업로드", type=['pdf'])
 
     if uploaded_file is not None:
-        # 파일 저장 로직 (안전한 저장)
+        # 파일 저장 로직 (tempfile 필요)
         if st.session_state['prac_file_path'] is None or st.session_state.get('prac_filename') != uploaded_file.name:
             try:
                 temp_dir = tempfile.gettempdir()
@@ -339,23 +336,22 @@ else:
                 target_index = i
                 break 
     
-    # 3. 입력창
+    # 3. 입력창 및 TTS 재생 (HTML 임베딩 방식)
     if target_index != -1:
         current_line = script[target_index]
         st.progress((target_index / len(script)), text=f"No. {target_index+1} / {len(script)}")
         
         st.chat_message("user", avatar="👤").write(f"**[{target_index+1}] {my_role}:** ❓❓❓")
         
-        # [핵심 수정] st.audio 대신 HTML Base64 플레이어 사용 (모바일 호환성 ↑)
         if tts_enabled and cue_line_text and st.session_state['last_played_index'] != target_index:
             try:
                 speaker_gender = gender_map.get(cue_line_role, '여성')
                 voice_code = "ko-KR-InJoonNeural" if speaker_gender == '남성' else "ko-KR-SunHiNeural"
                 
-                # HTML 문자열을 받음
+                # HTML 오디오 태그 생성 (비동기)
                 audio_html = asyncio.run(get_audio_html(cue_line_text, voice_code, rate_str))
                 
-                # 마크다운으로 HTML 삽입 (이러면 브라우저가 직접 오디오를 로딩함)
+                # HTML 삽입 (모바일 호환성 최적)
                 st.markdown(audio_html, unsafe_allow_html=True)
                 
                 st.session_state['last_played_index'] = target_index
