@@ -1,7 +1,6 @@
 import streamlit as st
 import os
 import sys
-import tempfile
 import difflib
 import re
 import time
@@ -10,9 +9,9 @@ import textwrap
 import asyncio
 import edge_tts
 import nest_asyncio
-import uuid  # 👈 [추가] 고유 파일명 생성을 위해 필요
+import base64  # 👈 [추가] 오디오를 텍스트로 변환하기 위해
 
-# [필수] 비동기 충돌 방지
+# 비동기 충돌 방지
 nest_asyncio.apply()
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -33,7 +32,6 @@ st.markdown("""
     .info-box { background-color: #f0f2f6; padding: 15px; border-radius: 10px; margin-bottom: 10px; }
     .past-msg { opacity: 0.7; }
     div.stButton > button { width: 100%; font-weight: bold; border-radius: 10px; }
-    
     div[data-testid="stRadio"] > label { font-weight: bold; }
     </style>
 """, unsafe_allow_html=True)
@@ -58,28 +56,35 @@ def is_pure_direction(text):
     cleaned = clean_text_for_comparison(text)
     return len(cleaned) == 0 
 
-# [핵심 수정] 파일 생성 -> 읽기 -> 삭제 (가장 안정적인 패턴)
-async def generate_audio_bytes(text, voice, rate_str):
+# [핵심 수정] Base64 HTML 플레이어 생성 함수
+async def get_audio_html(text, voice, rate_str):
     communicate = edge_tts.Communicate(text, voice, rate=rate_str)
+    mp3_data = b""
     
-    # 1. 고유한 임시 파일명 생성 (충돌 방지)
-    temp_filename = f"tts_{uuid.uuid4()}.mp3"
-    temp_path = os.path.join(tempfile.gettempdir(), temp_filename)
+    # 1. 메모리 스트림으로 데이터 받기
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            mp3_data += chunk["data"]
+            
+    # 2. Base64로 인코딩 (오디오를 문자열로 변환)
+    b64_audio = base64.b64encode(mp3_data).decode()
     
-    # 2. 파일로 저장 (edge-tts가 파일을 잘 다룸)
-    await communicate.save(temp_path)
-    
-    # 3. 바이트로 읽어오기
-    with open(temp_path, "rb") as f:
-        audio_bytes = f.read()
-        
-    # 4. 파일 삭제 (청소)
-    try:
-        os.remove(temp_path)
-    except:
-        pass
-        
-    return audio_bytes
+    # 3. HTML 오디오 태그 생성 (Autoplay 적용)
+    # 모바일 호환성을 위해 playsinline, controls 추가
+    html_code = f"""
+        <audio controls autoplay playsinline style="width: 100%; display: none;">
+            <source src="data:audio/mp3;base64,{b64_audio}" type="audio/mp3">
+            브라우저가 오디오를 지원하지 않습니다.
+        </audio>
+        <script>
+            var audio = document.querySelector("audio");
+            audio.volume = 1.0;
+            audio.play().catch(function(error) {{
+                console.log("Autoplay blocked: " + error);
+            }});
+        </script>
+    """
+    return html_code
 
 # --- 세션 초기화 ---
 if 'script_data' not in st.session_state: st.session_state['script_data'] = []
@@ -119,7 +124,7 @@ if not st.session_state['is_practice_started']:
         if st.session_state['prac_file_path'] is None or st.session_state.get('prac_filename') != uploaded_file.name:
             try:
                 temp_dir = tempfile.gettempdir()
-                file_path = os.path.join(temp_dir, f"uploaded_{uuid.uuid4()}.pdf") # PDF도 고유명으로
+                file_path = os.path.join(temp_dir, uploaded_file.name)
                 
                 with open(file_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
@@ -341,17 +346,18 @@ else:
         
         st.chat_message("user", avatar="👤").write(f"**[{target_index+1}] {my_role}:** ❓❓❓")
         
-        # [핵심] 오디오 재생 (Standard: File Write -> Read -> Delete)
+        # [핵심 수정] st.audio 대신 HTML Base64 플레이어 사용 (모바일 호환성 ↑)
         if tts_enabled and cue_line_text and st.session_state['last_played_index'] != target_index:
             try:
                 speaker_gender = gender_map.get(cue_line_role, '여성')
                 voice_code = "ko-KR-InJoonNeural" if speaker_gender == '남성' else "ko-KR-SunHiNeural"
                 
-                # 비동기 함수 실행 (바이트 데이터 받기)
-                audio_bytes = asyncio.run(generate_audio_bytes(cue_line_text, voice_code, rate_str))
+                # HTML 문자열을 받음
+                audio_html = asyncio.run(get_audio_html(cue_line_text, voice_code, rate_str))
                 
-                # 재생
-                st.audio(audio_bytes, format="audio/mp3", autoplay=True)
+                # 마크다운으로 HTML 삽입 (이러면 브라우저가 직접 오디오를 로딩함)
+                st.markdown(audio_html, unsafe_allow_html=True)
+                
                 st.session_state['last_played_index'] = target_index
                 
             except Exception as e:
