@@ -1,0 +1,17 @@
+# 가상환경 폴더 (이름이 다르면 그 이름으로)
+venv/
+.venv/
+env/
+
+# 파이썬 컴파일 파일
+__pycache__/
+*.pyc
+
+# 맥북 시스템 파일
+.DS_Store
+
+# 스트림릿 캐시 및 비밀 설정
+.streamlit/secrets.toml
+
+# ★중요★ 테스트로 올린 PDF나 생성된 결과물은 제외
+*.pdf
