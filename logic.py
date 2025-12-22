@@ -141,7 +141,33 @@ def analyze_and_get_coordinates(pdf_path, roles, config, start_page=1, start_phr
     return results
 
 # ---------------------------------------------------------
-# 5. [연습] 텍스트 추출 (지문 키워드 추가 🎬)
+# 4. [넘버링] PDF 생성
+# ---------------------------------------------------------
+def create_overlay_pdf(original_pdf_path, output_path, coordinates, font_name):
+    doc = fitz.open(original_pdf_path)
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_overlay:
+        c = canvas.Canvas(tmp_overlay.name, pagesize=A4)
+        current_page = -1
+        for item in coordinates:
+            while current_page < item['page']:
+                if current_page != -1: c.showPage()
+                current_page += 1
+                c.setFont(font_name, 10)
+                c.setFillColorRGB(1, 0, 0)
+            c.drawString(item['x'], item['y'], str(item['number']))
+        c.save()
+        tmp_path = tmp_overlay.name
+
+    overlay_doc = fitz.open(tmp_path)
+    for i in range(len(doc)):
+        if i < len(overlay_doc):
+            doc[i].show_pdf_page(doc[i].rect, overlay_doc, i)
+    doc.save(output_path)
+    overlay_doc.close()
+    os.remove(tmp_path)
+
+# ---------------------------------------------------------
+# 5. [연습] 텍스트 추출 (로직 개선 적용 완료)
 # ---------------------------------------------------------
 def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_page=1, start_phrase=""):
     script_data = []
@@ -160,17 +186,15 @@ def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_pag
         line_text = line_text.strip()
         if not line_text: return False
         
-        # 1. 괄호는 무조건 지문
+        # 1. 괄호
         if line_text.startswith('(') and line_text.endswith(')'): return True
         
-        # 2. [NEW] 지문 전용 키워드 감지 ("사이", "퇴장" 등)
-        # 예: "짧은 사이.", "사이.", "암전"
+        # 2. 지문 키워드
         keywords = ["사이", "퇴장", "등장", "암전", "막", "커튼콜"]
         for kw in keywords:
-            if kw in line_text and len(line_text) < 15: # 짧은 문장에 키워드가 있으면 지문
-                return True
+            if kw in line_text and len(line_text) < 15: return True
 
-        # 3. 독백/내레이션 보호 (1인칭 주어)
+        # 3. 1인칭 보호
         first_person_keywords = ["나 ", "나는", "내가", "나의", "내 ", "우리는", "우리가"]
         for kw in first_person_keywords:
             if line_text.startswith(kw): return False
@@ -181,7 +205,7 @@ def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_pag
             if line_text.startswith(conj): return False
 
         # 5. 길이 및 어미 체크
-        if len(line_text) > 35: return False # 길면 대사
+        if len(line_text) > 35: return False 
 
         clean_end = re.sub(r'[^가-힣]', '', line_text[-5:])
         ends_with_jimum = clean_end.endswith('다') or clean_end.endswith('함') or clean_end.endswith('음') or clean_end.endswith('장')
@@ -190,7 +214,6 @@ def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_pag
             if not is_speaking:
                 return True
             else:
-                # 말하고 있는 중이라도 짧으면 지문 (예: 전화가 울린다)
                 if len(line_text) < 20: 
                     return True
                 else:
@@ -227,7 +250,7 @@ def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_pag
             lines = text.split('\n')
             for line in lines:
                 line = line.strip()
-                if not line: continue # 빈 줄은 무시하되 연결성은 아래 로직에 맡김
+                if not line: continue 
 
                 if not found_start_phrase and clean_start_phrase:
                     clean_line = line.replace(" ", "").replace("\t", "")
@@ -272,7 +295,6 @@ def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_pag
                     is_continuation = False
                     if is_speaking and buffer_text:
                         last_line = buffer_text[-1].strip()
-                        # 문장이 끝나지 않았으면(마침표 등 없음) 무조건 대사 연장
                         if not last_line.endswith('.') and not last_line.endswith('?') and not last_line.endswith('!'):
                             is_continuation = True
                             
@@ -280,7 +302,7 @@ def extract_script_data(pdf_path, my_role, config, allowed_roles=None, start_pag
                         buffer_text.append(line)
                     elif is_likely_direction(line, is_speaking):
                         flush_buffer()
-                        current_role = None # 지문이 나오면 역할 끊김
+                        current_role = None
                         script_data.append({
                             'role': '지문', 
                             'text': line, 
